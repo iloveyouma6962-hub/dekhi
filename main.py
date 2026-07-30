@@ -62,7 +62,7 @@ def home():
 
 @app.get("/api/v1/extract")
 def extract_metadata(url: str = Query(..., description="Facebook Video URL")):
-    """ভিডিওর সব ফরম্যাট, সাইজ এবং ডাউনলোড লিংক এক্সট্র্যাক্ট করবে"""
+    """ফেসবুকের যেকোনো সাইজের ভিডিও এবং অডিও ফরম্যাট ডাইনামিকভাবে এক্সট্র্যাক্ট করবে"""
     proxy = get_proxy()
     cookies = get_cookies()
 
@@ -84,31 +84,25 @@ def extract_metadata(url: str = Query(..., description="Facebook Video URL")):
             thumbnail = info.get('thumbnail', '')
             duration = info.get('duration_string', 'N/A')
 
-            # ফরম্যাট প্রসেসিং
             available_formats = {}
-            target_qualities = ['1080p', '720p', '480p', '360p', '240p', '144p']
-            
             formats = info.get('formats', [])
             
-            # রেজোলিউশন অনুযায়ী সবচেয়ে সেরা স্ট্রিম খোঁজা
-            for q in target_qualities:
-                matching_f = None
-                height_target = int(q.replace('p', ''))
-                
-                for f in formats:
-                    if f.get('height') == height_target:
-                        matching_f = f
-                        break
-                
-                if matching_f:
-                    size = matching_f.get('filesize') or matching_f.get('filesize_approx')
-                    available_formats[q] = {
-                        "quality": q,
-                        "size": format_size(size),
-                        "download_url": f"/api/v1/download?url={url}&quality={q}"
-                    }
+            # ডাইনামিক ভিডিও কোয়ালিটি খোঁজার লজিক (যেকোনো সাইজের ভিডিও ধরবে)
+            for f in formats:
+                if f.get('vcodec') != 'none' and f.get('height'):
+                    h = int(f.get('height'))
+                    q_label = f"{h}p" # যেমন: 1080p, 720p, 360p ইত্যাদি
+                    
+                    size = f.get('filesize') or f.get('filesize_approx')
+                    
+                    if q_label not in available_formats:
+                        available_formats[q_label] = {
+                            "quality": q_label,
+                            "size": format_size(size),
+                            "download_url": f"/api/v1/download?url={url}&quality={q_label}"
+                        }
 
-            # MP3 / Audio Option
+            # অডিও/MP3 খোঁজার লজিক
             audio_size = None
             for f in formats:
                 if f.get('vcodec') == 'none' and f.get('acodec') != 'none':
@@ -147,7 +141,6 @@ def download_media(
     proxy = get_proxy()
     cookies = get_cookies()
 
-    # yt-dlp এর ডাউনলোডার অপশন
     ydl_opts = {
         'outtmpl': output_template,
         'quiet': True,
@@ -159,17 +152,16 @@ def download_media(
     if cookies:
         ydl_opts['cookiefile'] = cookies
 
-    # কোয়ালিটি অনুযায়ী ফরম্যাট সিলেক্ট এবং অটো-মার্জ লজিক
     if quality == 'mp3':
         ydl_opts['format'] = 'bestaudio/best'
         ydl_opts['postprocessors'] = [{
             'key': 'FFmpegExtractAudio',
             'preferredcodec': 'mp3',
-            'preferredquality': '1920',
+            'preferredquality': '192',
         }]
     else:
         target_height = quality.replace('p', '')
-        # যদি অডিও আলাদা থাকে, তবে সেরা অডিওর সাথে FFmpeg দিয়ে মার্জ করবে
+        # ভিডিও ও অডিও আলাদা থাকলে FFmpeg দিয়ে মার্জ করার অপশন
         ydl_opts['format'] = f"bestvideo[height<={target_height}]+bestaudio/bestvideo[height<={target_height}]/best"
         ydl_opts['merge_output_format'] = 'mp4'
 
@@ -178,28 +170,25 @@ def download_media(
             info = ydl.extract_info(url, download=True)
             filename = ydl.prepare_filename(info)
 
-            # MP3 হলে এক্সটেনশন চেঞ্জ চেক
             if quality == 'mp3':
                 filename = os.path.splitext(filename)[0] + ".mp3"
             else:
                 filename = os.path.splitext(filename)[0] + ".mp4"
 
         if not os.path.exists(filename):
-            # ব্যাকআপ চেক: যদি নির্দিষ্ট নামে না থাকে
             files = os.listdir(temp_dir)
             if files:
                 filename = os.path.join(temp_dir, files[0])
             else:
                 raise HTTPException(status_code=500, detail="File processing failed.")
 
-        # ক্লিনআপ টাঙ্ক (ডাউনলোড শেষে টেম্প ফাইল ডিলিট করার জন্য)
+        # ব্যাকগ্রাউন্ডে ফাইল ক্লিনআপ টাস্ক
         background_tasks.add_task(cleanup_temp_dir, temp_dir)
 
         download_name = f"FB_{quality}_{info.get('title', 'video')[:15]}.{'mp3' if quality=='mp3' else 'mp4'}"
-        # চিহ্নসমূহ রিমুভ করা যাতে ফাইলে নাম ঠিক থাকে
         download_name = "".join(c for c in download_name if c.isalnum() or c in "._- ")
 
-        # Content-Disposition: attachment এর ফলে পপ-আপ ছাড়া অটো ডাউনলোড শুরু হবে
+        # Content-Disposition দিয়ে পপ-আপ ছাড়াই ডাইরেক্ট অটো ডাউনলোড শুরু করানো
         return FileResponse(
             path=filename,
             media_type='audio/mpeg' if quality == 'mp3' else 'video/mp4',
