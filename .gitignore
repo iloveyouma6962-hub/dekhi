@@ -1,0 +1,13 @@
+# Python artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.env
+
+# Application directories
+downloads/
+
+# Sensitive files - Do NOT commit these
+cookies.txt
+proxies.txt
