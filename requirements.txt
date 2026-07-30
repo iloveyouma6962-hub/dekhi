@@ -1,4 +1,4 @@
-fastapi==0.109.2
-uvicorn==0.27.0.post1
-yt-dlp==2023.12.30
-pydantic==2.6.1
+fastapi
+uvicorn
+yt-dlp
+python-multipart
