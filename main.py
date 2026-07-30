@@ -1,163 +1,212 @@
 import os
-import random
-import uuid
 import shutil
-from fastapi import FastAPI, HTTPException, BackgroundTasks
-from fastapi.responses import FileResponse
-from pydantic import BaseModel, HttpUrl
+import tempfile
+import uuid
+from fastapi import FastAPI, HTTPException, Query, BackgroundTasks
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 import yt_dlp
 
-app = FastAPI(title="Video Downloader API", version="1.0.0")
+app = FastAPI(
+    title="FB Downloader API",
+    description="Facebook Video & Audio Downloader API with auto FFmpeg merging",
+    version="1.0.0"
+)
 
-PROXIES_FILE = "proxies.txt"
-COOKIES_FILE = "cookies.txt"
-DOWNLOAD_DIR = "downloads"
+# আপনার ওয়েবসাইট থেকে রিকোয়েস্ট এলাউ করার জন্য CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+# ----------------- হেলপার ফাংশনসমূহ ----------------- #
 
-def get_random_proxy() -> str | None:
-    if os.path.exists(PROXIES_FILE):
-        with open(PROXIES_FILE, "r") as f:
+def get_proxy():
+    """proxy.txt চেক করবে, না থাকলে None (Railway IP) রিটার্ন করবে"""
+    if os.path.exists("proxy.txt"):
+        with open("proxy.txt", "r") as f:
             proxies = [line.strip() for line in f if line.strip()]
             if proxies:
-                return random.choice(proxies)
+                return proxies[0]
     return None
 
-def get_base_ydl_opts() -> dict:
-    opts = {
-        'quiet': True,
-        'no_warnings': True,
-        'http_headers': {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        }
-    }
-    
-    proxy = get_random_proxy()
-    if proxy:
-        opts['proxy'] = proxy
-        
-    if os.path.exists(COOKIES_FILE):
-        opts['cookiefile'] = COOKIES_FILE
-        
-    return opts
+def get_cookies():
+    """cookies.txt ফাইল থাকলে তা ব্যবহার করবে"""
+    if os.path.exists("cookies.txt") and os.path.getsize("cookies.txt") > 0:
+        return "cookies.txt"
+    return None
 
-def format_size(bytes_size: int | float | None) -> str:
+def format_size(bytes_size):
+    """বাইটকে MB-তে কনভার্ট করে"""
     if not bytes_size:
-        return "Unknown Size"
-    for unit in ['B', 'KB', 'MB', 'GB']:
-        if bytes_size < 1024.0:
-            return f"{bytes_size:.2f} {unit}"
-        bytes_size /= 1024.0
-    return f"{bytes_size:.2f} TB"
+        return "N/A"
+    mb = bytes_size / (1024 * 1024)
+    return f"{mb:.2f} MB"
 
 def cleanup_temp_dir(dir_path: str):
-    if os.path.exists(dir_path):
+    """ডাউনলোড শেষে সার্ভারের স্টোরেজ খালি করার কাজ করবে"""
+    try:
         shutil.rmtree(dir_path)
+    except Exception as e:
+        print(f"Error cleaning up directory {dir_path}: {e}")
 
-class URLRequest(BaseModel):
-    url: HttpUrl
+# ----------------- API এন্ডপয়েন্টসমূহ ----------------- #
 
-class DownloadRequest(BaseModel):
-    url: HttpUrl
-    format_id: str = "best"
+@app.get("/")
+def home():
+    return {"status": "online", "message": "Facebook Video Downloader API is Running!"}
 
-@app.post("/api/info", summary="Extract Video Metadata")
-async def get_video_info(request: URLRequest):
-    ydl_opts = get_base_ydl_opts()
-    
+
+@app.get("/api/v1/extract")
+def extract_metadata(url: str = Query(..., description="Facebook Video URL")):
+    """ভিডিওর সব ফরম্যাট, সাইজ এবং ডাউনলোড লিংক এক্সট্র্যাক্ট করবে"""
+    proxy = get_proxy()
+    cookies = get_cookies()
+
+    ydl_opts = {
+        'skip_download': True,
+        'quiet': True,
+        'no_warnings': True,
+    }
+    if proxy:
+        ydl_opts['proxy'] = proxy
+    if cookies:
+        ydl_opts['cookiefile'] = cookies
+
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(str(request.url), download=False)
+            info = ydl.extract_info(url, download=False)
             
-            formats_data = []
-            seen_resolutions = set()
+            title = info.get('title', 'Facebook Video')
+            thumbnail = info.get('thumbnail', '')
+            duration = info.get('duration_string', 'N/A')
+
+            # ফরম্যাট প্রসেসিং
+            available_formats = {}
+            target_qualities = ['1080p', '720p', '480p', '360p', '240p', '144p']
+            
             formats = info.get('formats', [])
             
+            # রেজোলিউশন অনুযায়ী সবচেয়ে সেরা স্ট্রিম খোঁজা
+            for q in target_qualities:
+                matching_f = None
+                height_target = int(q.replace('p', ''))
+                
+                for f in formats:
+                    if f.get('height') == height_target:
+                        matching_f = f
+                        break
+                
+                if matching_f:
+                    size = matching_f.get('filesize') or matching_f.get('filesize_approx')
+                    available_formats[q] = {
+                        "quality": q,
+                        "size": format_size(size),
+                        "download_url": f"/api/v1/download?url={url}&quality={q}"
+                    }
+
+            # MP3 / Audio Option
+            audio_size = None
             for f in formats:
-                # ভিডিও স্ট্রিম আছে কিনা দেখা
-                if f.get('vcodec') != 'none' and f.get('vcodec') is not None:
-                    height = f.get('height')
-                    format_note = f.get('format_note')
-                    
-                    if height:
-                        res_name = f"{height}p"
-                    elif format_note:
-                        res_name = format_note
-                    else:
-                        res_name = "HD"
-                    
-                    # ডুপ্লিকেট কোয়ালিটি ফিল্টার করা
-                    if res_name not in seen_resolutions:
-                        seen_resolutions.add(res_name)
-                        formats_data.append({
-                            "format_id": f.get('format_id'),
-                            "resolution": res_name,
-                            "ext": f.get('ext', 'mp4'),
-                            "size": format_size(f.get('filesize') or f.get('filesize_approx'))
-                        })
-            
-            # কোনো নির্দিষ্ট কোয়ালিটি না পাওয়া গেলে 'best' অপশন দেওয়া
-            if not formats_data:
-                formats_data.append({
-                    "format_id": "best",
-                    "resolution": "HD / Best Quality",
-                    "ext": "mp4",
-                    "size": format_size(info.get('filesize') or info.get('filesize_approx'))
-                })
-            
-            return {
-                "title": info.get('title'),
-                "thumbnail": info.get('thumbnail'),
-                "duration_seconds": info.get('duration'),
-                "formats": formats_data
+                if f.get('vcodec') == 'none' and f.get('acodec') != 'none':
+                    audio_size = f.get('filesize') or f.get('filesize_approx')
+                    break
+
+            available_formats['mp3'] = {
+                "quality": "Audio (MP3)",
+                "size": format_size(audio_size),
+                "download_url": f"/api/v1/download?url={url}&quality=mp3"
             }
-            
+
+            return {
+                "success": True,
+                "title": title,
+                "thumbnail": thumbnail,
+                "duration": duration,
+                "formats": available_formats
+            }
+
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Failed to extract info: {str(e)}")
+        raise HTTPException(status_code=400, detail=f"Error extracting video: {str(e)}")
 
 
-@app.post("/api/download", summary="Download and Merge Video")
-async def download_video(request: DownloadRequest, background_tasks: BackgroundTasks):
-    session_id = str(uuid.uuid4())
-    temp_dir = os.path.join(DOWNLOAD_DIR, session_id)
-    os.makedirs(temp_dir, exist_ok=True)
-    
-    fid = request.format_id.strip() if request.format_id else "best"
-    
-    if fid in ["best", "string", "sd", "hd", ""]:
-        format_str = "bestvideo+bestaudio/best"
+@app.get("/api/v1/download")
+def download_media(
+    background_tasks: BackgroundTasks,
+    url: str = Query(...),
+    quality: str = Query(..., description="Example: 1080p, 720p, 360p, mp3")
+):
+    """ভিডিও/অডিও ডাউনলোড, FFmpeg দিয়ে মার্জ করে অটোমেটিক ফাইল রেসপন্স পাঠাবে"""
+    temp_dir = tempfile.mkdtemp()
+    file_id = str(uuid.uuid4())
+    output_template = os.path.join(temp_dir, f"{file_id}.%(ext)s")
+
+    proxy = get_proxy()
+    cookies = get_cookies()
+
+    # yt-dlp এর ডাউনলোডার অপশন
+    ydl_opts = {
+        'outtmpl': output_template,
+        'quiet': True,
+        'no_warnings': True,
+    }
+
+    if proxy:
+        ydl_opts['proxy'] = proxy
+    if cookies:
+        ydl_opts['cookiefile'] = cookies
+
+    # কোয়ালিটি অনুযায়ী ফরম্যাট সিলেক্ট এবং অটো-মার্জ লজিক
+    if quality == 'mp3':
+        ydl_opts['format'] = 'bestaudio/best'
+        ydl_opts['postprocessors'] = [{
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': 'mp3',
+            'preferredquality': '1920',
+        }]
     else:
-        format_str = f"{fid}+bestaudio/bestvideo+{fid}/{fid}/best"
-    
-    ydl_opts = get_base_ydl_opts()
-    ydl_opts.update({
-        'outtmpl': f'{temp_dir}/%(title)s.%(ext)s',
-        'format': format_str,
-        'merge_output_format': 'mp4',
-    })
-    
+        target_height = quality.replace('p', '')
+        # যদি অডিও আলাদা থাকে, তবে সেরা অডিওর সাথে FFmpeg দিয়ে মার্জ করবে
+        ydl_opts['format'] = f"bestvideo[height<={target_height}]+bestaudio/bestvideo[height<={target_height}]/best"
+        ydl_opts['merge_output_format'] = 'mp4'
+
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(str(request.url), download=True)
+            info = ydl.extract_info(url, download=True)
             filename = ydl.prepare_filename(info)
-            base, _ = os.path.splitext(filename)
-            final_file = f"{base}.mp4"
-            
-            if not os.path.exists(final_file):
-                files = os.listdir(temp_dir)
-                if files:
-                    final_file = os.path.join(temp_dir, files[0])
-                else:
-                    final_file = filename
-                
-            background_tasks.add_task(cleanup_temp_dir, temp_dir)
-            
-            return FileResponse(
-                path=final_file,
-                media_type="video/mp4",
-                filename=os.path.basename(final_file)
-            )
-            
+
+            # MP3 হলে এক্সটেনশন চেঞ্জ চেক
+            if quality == 'mp3':
+                filename = os.path.splitext(filename)[0] + ".mp3"
+            else:
+                filename = os.path.splitext(filename)[0] + ".mp4"
+
+        if not os.path.exists(filename):
+            # ব্যাকআপ চেক: যদি নির্দিষ্ট নামে না থাকে
+            files = os.listdir(temp_dir)
+            if files:
+                filename = os.path.join(temp_dir, files[0])
+            else:
+                raise HTTPException(status_code=500, detail="File processing failed.")
+
+        # ক্লিনআপ টাঙ্ক (ডাউনলোড শেষে টেম্প ফাইল ডিলিট করার জন্য)
+        background_tasks.add_task(cleanup_temp_dir, temp_dir)
+
+        download_name = f"FB_{quality}_{info.get('title', 'video')[:15]}.{'mp3' if quality=='mp3' else 'mp4'}"
+        # চিহ্নসমূহ রিমুভ করা যাতে ফাইলে নাম ঠিক থাকে
+        download_name = "".join(c for c in download_name if c.isalnum() or c in "._- ")
+
+        # Content-Disposition: attachment এর ফলে পপ-আপ ছাড়া অটো ডাউনলোড শুরু হবে
+        return FileResponse(
+            path=filename,
+            media_type='audio/mpeg' if quality == 'mp3' else 'video/mp4',
+            filename=download_name,
+            headers={"Content-Disposition": f'attachment; filename="{download_name}"'}
+        )
+
     except Exception as e:
         cleanup_temp_dir(temp_dir)
         raise HTTPException(status_code=500, detail=f"Download failed: {str(e)}")
