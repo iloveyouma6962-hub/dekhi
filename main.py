@@ -70,26 +70,40 @@ async def get_video_info(request: URLRequest):
             info = ydl.extract_info(str(request.url), download=False)
             
             formats_data = []
+            seen_resolutions = set()
             formats = info.get('formats', [])
             
-            if not formats:
-                formats_data.append({
-                    "format_id": "best",
-                    "resolution": "Default",
-                    "ext": info.get('ext', 'mp4'),
-                    "size": format_size(info.get('filesize') or info.get('filesize_approx')),
-                    "url": info.get('url')
-                })
-            else:
-                for f in formats:
-                    if f.get('vcodec') != 'none' and f.get('vcodec') is not None:
+            for f in formats:
+                # ভিডিও স্ট্রিম আছে কিনা দেখা
+                if f.get('vcodec') != 'none' and f.get('vcodec') is not None:
+                    height = f.get('height')
+                    format_note = f.get('format_note')
+                    
+                    if height:
+                        res_name = f"{height}p"
+                    elif format_note:
+                        res_name = format_note
+                    else:
+                        res_name = "HD"
+                    
+                    # ডুপ্লিকেট কোয়ালিটি ফিল্টার করা
+                    if res_name not in seen_resolutions:
+                        seen_resolutions.add(res_name)
                         formats_data.append({
                             "format_id": f.get('format_id'),
-                            "resolution": f.get('format_note') or f.get('resolution') or "Unknown",
-                            "ext": f.get('ext'),
-                            "size": format_size(f.get('filesize') or f.get('filesize_approx')),
-                            "url": f.get('url')
+                            "resolution": res_name,
+                            "ext": f.get('ext', 'mp4'),
+                            "size": format_size(f.get('filesize') or f.get('filesize_approx'))
                         })
+            
+            # কোনো নির্দিষ্ট কোয়ালিটি না পাওয়া গেলে 'best' অপশন দেওয়া
+            if not formats_data:
+                formats_data.append({
+                    "format_id": "best",
+                    "resolution": "HD / Best Quality",
+                    "ext": "mp4",
+                    "size": format_size(info.get('filesize') or info.get('filesize_approx'))
+                })
             
             return {
                 "title": info.get('title'),
@@ -110,7 +124,6 @@ async def download_video(request: DownloadRequest, background_tasks: BackgroundT
     
     fid = request.format_id.strip() if request.format_id else "best"
     
-    # "string", "best" বা খালি থাকলে স্মার্ট ফলব্যাক ফরম্যাট সিলেক্ট করবে
     if fid in ["best", "string", "sd", "hd", ""]:
         format_str = "bestvideo+bestaudio/best"
     else:
