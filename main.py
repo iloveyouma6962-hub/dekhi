@@ -55,6 +55,18 @@ def generate_unique_filename(raw_title: str, quality: str) -> str:
         
     return f"FB_{quality}p_{clean_title}_{timestamp}_{short_id}.mp4"
 
+# File size formatter function (Bytes to KB/MB/GB)
+def get_readable_file_size(filepath: str) -> str:
+    if not os.path.exists(filepath):
+        return "Unknown Size"
+    
+    size_bytes = os.path.getsize(filepath)
+    for unit in ['B', 'KB', 'MB', 'GB']:
+        if size_bytes < 1024.0:
+            return f"{size_bytes:.2f} {unit}"
+        size_bytes /= 1024.0
+    return f"{size_bytes:.2f} TB"
+
 # Facebook URL & Redirect Resolver
 def get_canonical_facebook_url(url: str) -> str:
     url = urllib.parse.unquote(url)
@@ -151,11 +163,14 @@ async def process_video(
         if not downloaded_files:
             raise HTTPException(status_code=400, detail="Video process failed. Check if video is public.")
 
+        # Calculate File Size
+        file_size = get_readable_file_size(downloaded_files[0])
         unique_filename = generate_unique_filename(video_title, quality)
 
         return {
             "success": True,
             "title": video_title,
+            "file_size": file_size,
             "file_id": file_id,
             "filename": unique_filename,
             "stream_url": f"/api/stream/{file_id}",
